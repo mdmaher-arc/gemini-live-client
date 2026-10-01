@@ -99,6 +99,11 @@ class GeminiAudioEngine(private val context: Context) {
         // ── Barge-in VAD config ──────────────────────────────────────────
         private const val BARGE_IN_RMS_THRESHOLD = 0.03f    // RMS energy to trigger barge-in
         private const val BARGE_IN_CONSECUTIVE_FRAMES = 3   // 3 × 10ms = 30ms to confirm voice
+
+        // ── Turn-completion VAD config ────────────────────────────────────
+        private const val VAD_SPEECH_RMS_THRESHOLD = 0.014f // RMS energy to count as user speaking
+        private const val VAD_MIN_SPEECH_FRAMES = 6         // 6 × 10ms = 60ms to confirm intentional speech
+        private const val VAD_SILENCE_FRAMES = 50           // 50 × 10ms = 500ms of silence after speech to trigger turn
     }
 
     // ── State flags ──────────────────────────────────────────────────────────
@@ -125,7 +130,7 @@ class GeminiAudioEngine(private val context: Context) {
     private var bargeInConsecutiveFrames = 0
 
     // ── Callbacks ────────────────────────────────────────────────────────────
-    /** Called every 10ms with 160 raw 16-bit PCM samples for Gemini Live upload */
+    /** Called with batched 16-bit PCM samples for Gemini Live upload */
     var onPcmCaptured: ((ShortArray) -> Unit)? = null
 
     /** Called every 10ms with 64 float FFT band magnitudes [0.0-1.0] for visualizer */
@@ -133,6 +138,12 @@ class GeminiAudioEngine(private val context: Context) {
 
     /** Called when local barge-in is triggered — tells ViewModel to interrupt Gemini */
     var onBargeInDetected: (() -> Unit)? = null
+
+    /** Called when local VAD confirms user finished speaking */
+    var onSpeechFinished: (() -> Unit)? = null
+
+    /** Called when user starts speaking */
+    var onUserSpeechStarted: (() -> Unit)? = null
 
     /** Called when all queued audio has finished playing through the speaker */
     var onPlaybackFinished: (() -> Unit)? = null
@@ -249,6 +260,12 @@ class GeminiAudioEngine(private val context: Context) {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
 
             val chunk = ShortArray(CAPTURE_CHUNK_SAMPLES) // 160 samples = 10ms
+            val batchBuffer = ShortArray(800)             // 50ms batch (800 samples)
+            var batchPos = 0
+
+            var userVoiceFrames = 0
+            var userSilenceFrames = 0
+            var isUserSpeaking = false
 
             while (isActive && isCapturing) {
                 val read = record.read(chunk, 0, CAPTURE_CHUNK_SAMPLES)
@@ -259,7 +276,7 @@ class GeminiAudioEngine(private val context: Context) {
                 val normalizedChunk = softNormalize(chunk, read, rms)
                 onCaptureLevel?.invoke(rms)
 
-                // ── TASK 6: Local Barge-In VAD Gate ──────────────────────
+                // ── TASK 6: Local Barge-In VAD Gate (while Gemini is speaking) ────
                 if (isPlayingBack && rms > BARGE_IN_RMS_THRESHOLD) {
                     bargeInConsecutiveFrames++
                     if (bargeInConsecutiveFrames >= BARGE_IN_CONSECUTIVE_FRAMES) {
@@ -272,8 +289,47 @@ class GeminiAudioEngine(private val context: Context) {
                     bargeInConsecutiveFrames = 0
                 }
 
-                // ── TASK 4: Send PCM chunk up to WebSocket writer ─────────
-                onPcmCaptured?.invoke(normalizedChunk)
+                // ── Local VAD: Detect speech start & silence turn completion ──────
+                if (!isPlayingBack) {
+                    if (rms > VAD_SPEECH_RMS_THRESHOLD) {
+                        userVoiceFrames++
+                        userSilenceFrames = 0
+                        if (userVoiceFrames >= VAD_MIN_SPEECH_FRAMES && !isUserSpeaking) {
+                            isUserSpeaking = true
+                            Log.d(TAG, "VAD: User speech started (RMS=$rms)")
+                            onUserSpeechStarted?.invoke()
+                        }
+                    } else {
+                        if (isUserSpeaking) {
+                            userSilenceFrames++
+                            if (userSilenceFrames >= VAD_SILENCE_FRAMES) {
+                                isUserSpeaking = false
+                                userVoiceFrames = 0
+                                userSilenceFrames = 0
+                                Log.d(TAG, "VAD: User pause detected ($VAD_SILENCE_FRAMES frames silence) → onSpeechFinished")
+                                // Flush any remainder in batch buffer
+                                if (batchPos > 0) {
+                                    val flushBatch = batchBuffer.copyOf(batchPos)
+                                    batchPos = 0
+                                    onPcmCaptured?.invoke(flushBatch)
+                                }
+                                onSpeechFinished?.invoke()
+                            }
+                        } else {
+                            userVoiceFrames = 0
+                        }
+                    }
+                }
+
+                // ── TASK 4: Batch PCM chunks (50ms) for high-efficiency WebSocket transport ──
+                val toCopy = minOf(read, batchBuffer.size - batchPos)
+                System.arraycopy(normalizedChunk, 0, batchBuffer, batchPos, toCopy)
+                batchPos += toCopy
+                if (batchPos >= batchBuffer.size) {
+                    val batch = batchBuffer.clone()
+                    batchPos = 0
+                    onPcmCaptured?.invoke(batch)
+                }
 
                 // ── TASK 7: Real-Time FFT for Visualizer ─────────────────
                 val fftBands = computeFftBands(normalizedChunk, read)

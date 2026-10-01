@@ -241,7 +241,24 @@ fun MainScreen(viewModel: GeminiLiveViewModel) {
                     SessionState.CONNECTING -> {
                         LoadingButton()
                     }
-                    SessionState.CONNECTED, SessionState.LISTENING, SessionState.THINKING -> {
+                    SessionState.CONNECTED, SessionState.LISTENING -> {
+                        Button(
+                            onClick = { viewModel.triggerManualSend() },
+                            shape = CircleShape,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AccentStart,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.size(64.dp)
+                        ) {
+                            Icon(Icons.Default.Mic, contentDescription = "Done Speaking / Send", modifier = Modifier.size(28.dp))
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        EndButton(onClick = { viewModel.endSession() })
+                    }
+                    SessionState.THINKING -> {
+                        LoadingButton()
+                        Spacer(Modifier.width(16.dp))
                         EndButton(onClick = { viewModel.endSession() })
                     }
                     SessionState.SPEAKING -> {

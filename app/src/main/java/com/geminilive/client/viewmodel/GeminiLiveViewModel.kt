@@ -171,6 +171,17 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
 
+        // Automatic VAD speech completion
+        audioEngine.onSpeechFinished = {
+            viewModelScope.launch {
+                if (_sessionState.value == SessionState.LISTENING) {
+                    Log.d(TAG, "VAD speech pause detected — sending turnComplete to Gemini")
+                    _sessionState.value = SessionState.THINKING
+                    wsClient.sendTurnComplete()
+                }
+            }
+        }
+
         // Playback finished -> back to listening
         audioEngine.onPlaybackFinished = {
             viewModelScope.launch {
@@ -287,6 +298,15 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
             wsClient.sendInterrupt()
             commitAiTranscript()
             _sessionState.value = SessionState.LISTENING
+            hapticClick()
+        }
+    }
+
+    fun triggerManualSend() {
+        if (_sessionState.value == SessionState.LISTENING) {
+            Log.d(TAG, "Manual turn complete triggered by user")
+            _sessionState.value = SessionState.THINKING
+            wsClient.sendTurnComplete()
             hapticClick()
         }
     }

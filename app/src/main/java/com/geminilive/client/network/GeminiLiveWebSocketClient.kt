@@ -255,6 +255,21 @@ class GeminiLiveWebSocketClient {
     }
 
     /**
+     * Signals to Gemini that the user's speech turn is complete and it should generate audio now.
+     */
+    fun sendTurnComplete() {
+        val ws = webSocket ?: return
+        val message = mapOf(
+            "clientContent" to mapOf(
+                "turnComplete" to true
+            )
+        )
+        val json = gson.toJson(message)
+        val sent = ws.send(json)
+        Log.d(TAG, "Sent clientContent turnComplete to Gemini (sent=$sent)")
+    }
+
+    /**
      * Sends an interruption / turn completion signal to Gemini when barge-in is triggered.
      */
     fun sendInterrupt() {
