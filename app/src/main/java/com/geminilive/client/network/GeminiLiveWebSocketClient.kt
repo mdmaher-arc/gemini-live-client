@@ -42,8 +42,8 @@ class GeminiLiveWebSocketClient {
         private const val GEMINI_WS_BASE = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
         
         // Official Gemini Multimodal Live API model IDs
-        const val DEFAULT_MODEL = "models/gemini-2.0-flash-exp"
-        const val FALLBACK_MODEL = "models/gemini-2.0-flash"
+        const val DEFAULT_MODEL = "models/gemini-3.8-live"
+        const val FALLBACK_MODEL = "models/gemini-3.8-live"
 
         const val DEFAULT_SYSTEM_PROMPT = """You are a highly intelligent, warm, and empathetic personal AI assistant. You speak in a natural, conversational tone, like a knowledgeable best friend. Keep your responses concise but complete. Use natural speech patterns including brief acknowledgements ("Got it", "Sure", "Of course"). You understand context, emotion in the user's voice, and adapt your tone accordingly. You can handle any topic: information, analysis, creative writing, coding, math, and more."""
     }
@@ -99,7 +99,13 @@ class GeminiLiveWebSocketClient {
         val cleanKey = apiKey.trim().replace("\n", "").replace("\r", "").replace("\"", "")
         this.apiKey = cleanKey
         this.systemPrompt = systemPrompt
-        this.modelId = if (model.isNotBlank()) model else DEFAULT_MODEL
+        // Auto-migrate legacy 2.0 models to official 3.8 Live model
+        val resolvedModel = if (model.isBlank() || model.contains("2.0") || model.contains("flash-exp")) {
+            DEFAULT_MODEL
+        } else {
+            model
+        }
+        this.modelId = resolvedModel
         this.voiceName = if (voice.isNotBlank()) voice else "Puck"
         this.userInitiatedDisconnect = false
 
@@ -124,7 +130,12 @@ class GeminiLiveWebSocketClient {
             }
 
             override fun onMessage(ws: WebSocket, bytes: ByteString) {
-                Log.w(TAG, "Received unexpected binary message: ${bytes.size} bytes")
+                try {
+                    val text = bytes.utf8()
+                    handleServerMessage(text)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error parsing binary message: ${e.message}", e)
+                }
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
@@ -263,13 +274,20 @@ class GeminiLiveWebSocketClient {
     // ═══════════════════════════════════════════════════════════════════════
 
     private fun handleServerMessage(json: String) {
+        if (json.isBlank()) return
         try {
-            val root = gson.fromJson(json, JsonObject::class.java)
+            val root = gson.fromJson(json, JsonObject::class.java) ?: return
 
             // ── 1. Setup Acknowledgement ────────────────────────────────
             if (root.has("setupComplete")) {
                 Log.d(TAG, "Gemini Live setup complete confirmed by server! Ready for audio streaming.")
                 onSetupComplete?.invoke()
+                return
+            }
+
+            // ── Session Resumption ──────────────────────────────────────
+            if (root.has("sessionResumptionUpdate")) {
+                Log.d(TAG, "Gemini session resumption handle updated")
                 return
             }
 

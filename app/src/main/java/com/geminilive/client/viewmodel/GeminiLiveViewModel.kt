@@ -101,7 +101,12 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
             val prefs = getApplication<Application>().dataStore.data.first()
             _apiKey.value = prefs[API_KEY_PREF] ?: ""
             _systemPrompt.value = prefs[SYSTEM_PROMPT_PREF] ?: GeminiLiveWebSocketClient.DEFAULT_SYSTEM_PROMPT
-            _modelId.value = prefs[MODEL_ID_PREF] ?: GeminiLiveWebSocketClient.DEFAULT_MODEL
+            val savedModel = prefs[MODEL_ID_PREF] ?: GeminiLiveWebSocketClient.DEFAULT_MODEL
+            _modelId.value = if (savedModel.contains("2.0") || savedModel.contains("flash-exp")) {
+                GeminiLiveWebSocketClient.DEFAULT_MODEL
+            } else {
+                savedModel
+            }
             _voiceName.value = prefs[VOICE_NAME_PREF] ?: "Puck"
         }
     }

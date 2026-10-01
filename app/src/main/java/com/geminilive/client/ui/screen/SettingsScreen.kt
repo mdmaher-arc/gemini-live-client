@@ -91,8 +91,8 @@ fun SettingsScreen(
 
     val voices = listOf("Puck", "Aoede", "Charon", "Fenrir", "Kore")
     val models = listOf(
-        "models/gemini-2.0-flash-exp" to "Gemini 2.0 Flash Exp (Official Live)",
-        "models/gemini-2.0-flash" to "Gemini 2.0 Flash (General GA)"
+        "models/gemini-3.8-live" to "Gemini 3.8 Live (Official Live Audio)",
+        "models/gemini-3.8-live-extended-thinking" to "Gemini 3.8 Live (Extended Thinking)"
     )
 
     Box(
