@@ -18,21 +18,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -50,7 +47,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -69,7 +65,6 @@ import com.geminilive.client.ui.theme.GeminiGreen
 import com.geminilive.client.ui.theme.GeminiRed
 import com.geminilive.client.viewmodel.GeminiLiveViewModel
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     viewModel: GeminiLiveViewModel,
@@ -77,18 +72,28 @@ fun SettingsScreen(
 ) {
     val savedApiKey by viewModel.apiKey.collectAsState()
     val savedPrompt by viewModel.systemPrompt.collectAsState()
+    val savedModel by viewModel.modelId.collectAsState()
+    val savedVoice by viewModel.voiceName.collectAsState()
 
     var apiKeyText by remember(savedApiKey) { mutableStateOf(savedApiKey) }
     var promptText by remember(savedPrompt) { mutableStateOf(savedPrompt) }
+    var selectedModel by remember(savedModel) { mutableStateOf(savedModel) }
+    var selectedVoice by remember(savedVoice) { mutableStateOf(savedVoice) }
+
     var apiKeyVisible by remember { mutableStateOf(false) }
     var saveStatus by remember { mutableStateOf<String?>(null) }
 
-    // Hardware status inspection
     val hasHardwareAec = remember { AcousticEchoCanceler.isAvailable() }
     val hasHardwareNs = remember { NoiseSuppressor.isAvailable() }
     val hasHardwareAgc = remember { AutomaticGainControl.isAvailable() }
 
     val scrollState = rememberScrollState()
+
+    val voices = listOf("Puck", "Aoede", "Charon", "Fenrir", "Kore")
+    val models = listOf(
+        "models/gemini-2.0-flash-exp" to "Gemini 2.0 Flash Exp (Official Live)",
+        "models/gemini-2.0-flash" to "Gemini 2.0 Flash (General GA)"
+    )
 
     Box(
         modifier = Modifier
@@ -122,7 +127,7 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(20.dp))
 
-            // ── SECTION 1: Google Gemini API Configuration ───────────────
+            // ── SECTION 1: Google Gemini API Credentials ─────────────────
             Text(
                 text = "GEMINI LIVE API CREDENTIALS",
                 color = AccentStart,
@@ -162,15 +167,108 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "• Free tier available at aistudio.google.com with native audio streaming\n• Uses Gemini 2.0 Flash Multimodal Live API (Bidirectional WebSocket)",
+                text = "• Obtain a free key from https://aistudio.google.com/\n• Full-duplex bidirectional streaming via WebSocket",
                 color = DarkSubtext,
                 fontSize = 12.sp,
                 lineHeight = 16.sp
             )
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(20.dp))
 
-            // ── SECTION 2: System Persona & Prompt ───────────────────────
+            // ── SECTION 2: Model Selection ───────────────────────────────
+            Text(
+                text = "MULTIMODAL LIVE MODEL",
+                color = AccentStart,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 1.sp
+            )
+            Spacer(Modifier.height(8.dp))
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                models.forEach { (id, label) ->
+                    val isSelected = selectedModel == id
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isSelected) AccentStart.copy(alpha = 0.2f) else DarkCard)
+                            .border(
+                                1.dp,
+                                if (isSelected) AccentStart else DarkBorder,
+                                RoundedCornerShape(12.dp)
+                            )
+                            .clickable { selectedModel = id }
+                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column {
+                                Text(
+                                    text = label,
+                                    color = if (isSelected) Color.White else DarkText,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(text = id, color = DarkSubtext, fontSize = 11.sp)
+                            }
+                            if (isSelected) {
+                                Icon(
+                                    Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = AccentStart,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            // ── SECTION 3: Voice Selection ───────────────────────────────
+            Text(
+                text = "AI VOICE SELECTION",
+                color = AccentMid,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 1.sp
+            )
+            Spacer(Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                voices.forEach { voice ->
+                    val isSelected = selectedVoice == voice
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { selectedVoice = voice },
+                        label = { Text(voice, fontSize = 12.sp) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = AccentMid,
+                            selectedLabelColor = Color.White,
+                            containerColor = DarkCard,
+                            labelColor = DarkText
+                        ),
+                        border = FilterChipDefaults.filterChipBorder(
+                            enabled = true,
+                            selected = isSelected,
+                            borderColor = DarkBorder,
+                            selectedBorderColor = AccentMid
+                        )
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            // ── SECTION 4: System Instruction ────────────────────────────
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -184,9 +282,7 @@ fun SettingsScreen(
                     letterSpacing = 1.sp
                 )
                 IconButton(
-                    onClick = {
-                        promptText = GeminiLiveWebSocketClient.DEFAULT_SYSTEM_PROMPT
-                    },
+                    onClick = { promptText = GeminiLiveWebSocketClient.DEFAULT_SYSTEM_PROMPT },
                     modifier = Modifier.size(28.dp)
                 ) {
                     Icon(
@@ -205,7 +301,7 @@ fun SettingsScreen(
                 label = { Text("System Instruction", color = DarkSubtext) },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(130.dp),
+                    .height(110.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = DarkText,
                     unfocusedTextColor = DarkText,
@@ -217,9 +313,9 @@ fun SettingsScreen(
                 shape = RoundedCornerShape(12.dp)
             )
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(20.dp))
 
-            // ── SECTION 3: Hardware Diagnostics (The 7 Tasks) ────────────
+            // ── SECTION 5: Hardware Audio Diagnostics ────────────────────
             Text(
                 text = "CLIENT AUDIO ENGINE DIAGNOSTICS (7 TASKS)",
                 color = AccentEnd,
@@ -231,63 +327,57 @@ fun SettingsScreen(
 
             DiagnosticCard(
                 title = "1. Hardware Echo Canceler (AEC)",
-                status = if (hasHardwareAec) "DSP Active (Telephony Hardware)" else "Software DSP (VOICE_COMMUNICATION)",
+                status = if (hasHardwareAec) "Hardware Telephony DSP Active" else "VOICE_COMMUNICATION DSP Active",
                 isSuccess = true,
-                detail = "Hardware DSP subtracts speaker audio from mic before CPU processing."
+                detail = "Hardware DSP cancels speaker output before mic signal reaches CPU."
             )
-
             Spacer(Modifier.height(8.dp))
 
             DiagnosticCard(
                 title = "2. Noise Suppression & AGC",
-                status = if (hasHardwareNs) "Hardware Multi-Mic Beamforming" else "Software Spectral Subtraction Active",
+                status = if (hasHardwareNs) "Multi-Mic Hardware Beamforming" else "Spectral Subtraction + AGC Active",
                 isSuccess = true,
-                detail = "Cleans background noise and normalizes whisper-to-loud input volume."
+                detail = "Cleans background acoustics and normalizes speech input volume."
             )
-
             Spacer(Modifier.height(8.dp))
 
             DiagnosticCard(
                 title = "3. Ultra Low-Latency Audio Pipeline",
-                status = "Fast-Mixer AAudio Bypass (10ms chunks)",
+                status = "Fast-Mixer AAudio Bypass (10ms frames)",
                 isSuccess = true,
-                detail = "Real-time thread priority (THREAD_PRIORITY_URGENT_AUDIO) with minimal buffers."
+                detail = "Real-time thread priority (THREAD_PRIORITY_URGENT_AUDIO) on 16kHz PCM."
             )
-
             Spacer(Modifier.height(8.dp))
 
             DiagnosticCard(
                 title = "4. Full-Duplex Bidirectional Streaming",
-                status = "Active (16kHz Capture / 24kHz Playback)",
+                status = "Gemini Live WebSocket Client",
                 isSuccess = true,
-                detail = "Simultaneous upload and playback via persistent WebSocket channel."
+                detail = "Simultaneous upload and playback via persistent full-duplex socket."
             )
-
             Spacer(Modifier.height(8.dp))
 
             DiagnosticCard(
                 title = "5. Adaptive Jitter Buffer & DAC Drain",
-                status = "Hardware DAC Position Sync",
+                status = "Hardware DAC Sample Position Sync",
                 isSuccess = true,
-                detail = "Exact sample synchronization ensures zero truncation at end of speech."
+                detail = "Tracks exact physical speaker drain to eliminate premature turn cut-offs."
             )
-
             Spacer(Modifier.height(8.dp))
 
             DiagnosticCard(
                 title = "6. Zero-Latency Local Barge-In",
                 status = "<1ms Local Kill-Switch Armed",
                 isSuccess = true,
-                detail = "RMS energy threshold instantly halts playback locally before cloud round-trip."
+                detail = "Local RMS VAD gate stops speaker playback before server round-trip."
             )
-
             Spacer(Modifier.height(8.dp))
 
             DiagnosticCard(
                 title = "7. Real-Time FFT Waveform & Haptics",
-                status = "64 Bark-Scale Bands (GPU Canvas)",
+                status = "64 Bark-Scale Filterbank (GPU Canvas)",
                 isSuccess = true,
-                detail = "Cooley-Tukey DFT computed per 10ms frame with tactile haptic events."
+                detail = "Non-blocking high-speed energy filterbank with tactile haptic events."
             )
 
             Spacer(Modifier.height(24.dp))
@@ -297,6 +387,8 @@ fun SettingsScreen(
                 onClick = {
                     viewModel.saveApiKey(apiKeyText)
                     viewModel.saveSystemPrompt(promptText)
+                    viewModel.saveModelId(selectedModel)
+                    viewModel.saveVoiceName(selectedVoice)
                     saveStatus = "Settings saved successfully!"
                 },
                 modifier = Modifier

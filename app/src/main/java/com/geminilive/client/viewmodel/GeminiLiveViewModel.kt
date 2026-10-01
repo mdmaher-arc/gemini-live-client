@@ -19,36 +19,22 @@ import com.geminilive.client.data.FftData
 import com.geminilive.client.data.SessionState
 import com.geminilive.client.data.TurnRole
 import com.geminilive.client.network.GeminiLiveWebSocketClient
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore("gemini_prefs")
 private val API_KEY_PREF = stringPreferencesKey("api_key")
 private val SYSTEM_PROMPT_PREF = stringPreferencesKey("system_prompt")
+private val MODEL_ID_PREF = stringPreferencesKey("model_id")
+private val VOICE_NAME_PREF = stringPreferencesKey("voice_name")
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════
  * GEMINI LIVE VIEWMODEL — SESSION COORDINATOR
  * ═══════════════════════════════════════════════════════════════════════════
- *
- * Coordinates the audio engine and WebSocket client, managing the full-duplex
- * session lifecycle:
- *
- *   IDLE → CONNECTING → CONNECTED → LISTENING ↔ SPEAKING
- *
- * All 7 client-side tasks flow through here:
- *   1. AEC / NS / AGC → GeminiAudioEngine handles at capture level
- *   2. Beamforming → Hardware via VOICE_COMMUNICATION source
- *   3. Low-Latency Audio → GeminiAudioEngine (AAudio path)
- *   4. Full-Duplex Stream → sendAudioChunk on every 10ms PCM frame
- *   5. Adaptive Jitter Buffer → GeminiAudioEngine.enqueuePcm()
- *   6. Barge-In Kill-Switch → onBargeInDetected → sendInterrupt + stopPlayback
- *   7. FFT Visualizer → fftData StateFlow → Compose GPU canvas
  */
 class GeminiLiveViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -56,7 +42,6 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
         private const val TAG = "GeminiLiveVM"
     }
 
-    // ── Core components ──────────────────────────────────────────────────────
     private val audioEngine = GeminiAudioEngine(application)
     private val wsClient = GeminiLiveWebSocketClient()
 
@@ -91,7 +76,12 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
     private val _systemPrompt = MutableStateFlow<String>(GeminiLiveWebSocketClient.DEFAULT_SYSTEM_PROMPT)
     val systemPrompt: StateFlow<String> = _systemPrompt.asStateFlow()
 
-    // Haptic vibrator
+    private val _modelId = MutableStateFlow(GeminiLiveWebSocketClient.DEFAULT_MODEL)
+    val modelId: StateFlow<String> = _modelId.asStateFlow()
+
+    private val _voiceName = MutableStateFlow("Puck")
+    val voiceName: StateFlow<String> = _voiceName.asStateFlow()
+
     private val vibrator: Vibrator? by lazy {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             (application.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
@@ -106,23 +96,22 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
         setupCallbacks()
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // Preferences
-    // ═════════════════════════════════════════════════════════════════════════
-
     private fun loadPreferences() {
         viewModelScope.launch {
             val prefs = getApplication<Application>().dataStore.data.first()
             _apiKey.value = prefs[API_KEY_PREF] ?: ""
             _systemPrompt.value = prefs[SYSTEM_PROMPT_PREF] ?: GeminiLiveWebSocketClient.DEFAULT_SYSTEM_PROMPT
+            _modelId.value = prefs[MODEL_ID_PREF] ?: GeminiLiveWebSocketClient.DEFAULT_MODEL
+            _voiceName.value = prefs[VOICE_NAME_PREF] ?: "Puck"
         }
     }
 
     fun saveApiKey(key: String) {
-        _apiKey.value = key.trim()
+        val clean = key.trim().replace("\n", "").replace("\r", "").replace("\"", "")
+        _apiKey.value = clean
         viewModelScope.launch {
             getApplication<Application>().dataStore.edit { prefs ->
-                prefs[API_KEY_PREF] = key.trim()
+                prefs[API_KEY_PREF] = clean
             }
         }
     }
@@ -136,56 +125,76 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // Callback Wiring
-    // ═════════════════════════════════════════════════════════════════════════
+    fun saveModelId(model: String) {
+        _modelId.value = model
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit { prefs ->
+                prefs[MODEL_ID_PREF] = model
+            }
+        }
+    }
+
+    fun saveVoiceName(voice: String) {
+        _voiceName.value = voice
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit { prefs ->
+                prefs[VOICE_NAME_PREF] = voice
+            }
+        }
+    }
 
     private fun setupCallbacks() {
-        // ── TASK 4: Every 10ms PCM chunk → send to Gemini ─────────────────
+        // Stream audio chunk outward to Gemini
         audioEngine.onPcmCaptured = { samples ->
             if (_sessionState.value == SessionState.LISTENING) {
                 wsClient.sendAudioChunk(samples)
             }
         }
 
-        // ── TASK 7: FFT data → UI visualizer StateFlow ─────────────────────
+        // FFT visualizer data
         audioEngine.onFftData = { bands, rms ->
             _fftData.value = FftData(bands = bands, overallLevel = rms)
         }
 
-        // ── TASK 6: Barge-in detected locally → interrupt Gemini ──────────
+        // Local barge-in kill-switch
         audioEngine.onBargeInDetected = {
             viewModelScope.launch {
-                Log.d(TAG, "Barge-in! Sending interrupt to Gemini server")
+                Log.d(TAG, "Barge-in triggered locally — sending interrupt to Gemini")
                 wsClient.sendInterrupt()
-                // Already stopped local playback in AudioEngine — zero latency
                 _sessionState.value = SessionState.LISTENING
                 hapticClick()
             }
         }
 
-        // ── Playback finished → transition back to LISTENING ──────────────
+        // Playback finished -> back to listening
         audioEngine.onPlaybackFinished = {
             viewModelScope.launch {
                 if (_sessionState.value == SessionState.SPEAKING) {
-                    Log.d(TAG, "Playback finished → returning to LISTENING")
                     commitAiTranscript()
                     _sessionState.value = SessionState.LISTENING
-                    // No need to call anything — audio capture is already running full-duplex
                 }
             }
         }
 
-        // ── Volume levels → UI indicators ─────────────────────────────────
         audioEngine.onCaptureLevel = { level -> _captureLevel.value = level }
         audioEngine.onPlaybackLevel = { level -> _playbackLevel.value = level }
 
-        // ── WebSocket Callbacks ────────────────────────────────────────────
+        // WebSocket events
         wsClient.onConnected = {
             viewModelScope.launch {
                 _sessionState.value = SessionState.CONNECTED
                 _errorMessage.value = null
-                Log.d(TAG, "Connected to Gemini Live")
+                Log.d(TAG, "WebSocket connected — waiting for setup complete")
+            }
+        }
+
+        // Handshake confirmed by Gemini server
+        wsClient.onSetupComplete = {
+            viewModelScope.launch {
+                Log.d(TAG, "Gemini session setup complete! Starting microphone capture.")
+                _sessionState.value = SessionState.LISTENING
+                _errorMessage.value = null
+                audioEngine.startCapture()
                 hapticSuccess()
             }
         }
@@ -203,15 +212,16 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
 
         wsClient.onError = { error ->
             viewModelScope.launch {
-                _errorMessage.value = error
-                _sessionState.value = SessionState.ERROR
+                Log.e(TAG, "Session Error: $error")
                 audioEngine.stopCapture()
                 audioEngine.stopPlayback()
+                _errorMessage.value = error
+                _sessionState.value = SessionState.ERROR
                 hapticError()
             }
         }
 
-        // ── Incoming audio from Gemini → TASK 5: Jitter buffer ───────────
+        // Play incoming audio chunks from Gemini
         wsClient.onAudioResponseChunk = { samples ->
             if (_sessionState.value != SessionState.SPEAKING) {
                 viewModelScope.launch {
@@ -225,11 +235,9 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
         wsClient.onTurnComplete = {
             viewModelScope.launch {
                 audioEngine.markStreamEnd()
-                Log.d(TAG, "Gemini turn complete — draining audio buffer")
             }
         }
 
-        // ── Transcripts ───────────────────────────────────────────────────
         wsClient.onInputTranscript = { text ->
             viewModelScope.launch { _userTranscript.value = text }
         }
@@ -241,13 +249,10 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // Session Control
-    // ═════════════════════════════════════════════════════════════════════════
-
     fun startSession() {
-        val key = _apiKey.value.trim()
-        if (key.isBlank()) {
+        val rawKey = _apiKey.value
+        val cleanKey = rawKey.trim().replace("\n", "").replace("\r", "").replace("\"", "").replace("'", "")
+        if (cleanKey.isBlank()) {
             _errorMessage.value = "Please enter your Google AI Studio API key in Settings."
             return
         }
@@ -255,22 +260,8 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
         _sessionState.value = SessionState.CONNECTING
         _errorMessage.value = null
 
-        // Initialize playback engine (pre-warms AudioTrack for instant first response)
         audioEngine.initPlayback(GeminiAudioEngine.PLAYBACK_SAMPLE_RATE)
-
-        // Connect to Gemini Live WebSocket
-        wsClient.connect(key, _systemPrompt.value)
-
-        // Start full-duplex audio capture immediately after connecting
-        viewModelScope.launch {
-            // Brief delay for WS to open before sending audio
-            kotlinx.coroutines.delay(600)
-            if (_sessionState.value == SessionState.CONNECTED) {
-                _sessionState.value = SessionState.LISTENING
-                audioEngine.startCapture()
-                hapticSuccess()
-            }
-        }
+        wsClient.connect(cleanKey, _systemPrompt.value, _modelId.value, _voiceName.value)
     }
 
     fun endSession() {
@@ -285,14 +276,10 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
         commitAiTranscript()
     }
 
-    /**
-     * TASK 6: User manually pressed "Interrupt" while Gemini is speaking.
-     * Local speaker stops immediately, interrupt signal sent to server.
-     */
     fun manualInterrupt() {
         if (_sessionState.value == SessionState.SPEAKING) {
-            audioEngine.stopPlayback()       // LOCAL kill — instant
-            wsClient.sendInterrupt()         // Tell server to halt generation
+            audioEngine.stopPlayback()
+            wsClient.sendInterrupt()
             commitAiTranscript()
             _sessionState.value = SessionState.LISTENING
             hapticClick()
@@ -302,10 +289,6 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
     fun clearError() {
         _errorMessage.value = null
     }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // Conversation transcript management
-    // ═════════════════════════════════════════════════════════════════════════
 
     private fun commitUserTranscript() {
         val text = _userTranscript.value.trim()
@@ -322,10 +305,6 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
             _aiTranscript.value = ""
         }
     }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // TASK 7: Haptic Feedback
-    // ═════════════════════════════════════════════════════════════════════════
 
     private fun hapticClick() {
         try {
