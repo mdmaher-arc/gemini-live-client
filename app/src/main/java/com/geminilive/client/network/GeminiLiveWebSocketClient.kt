@@ -41,6 +41,8 @@ class GeminiLiveWebSocketClient {
         private const val TAG = "GeminiWS"
         private const val GEMINI_WS_BASE = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
         private const val MODEL_ID = "models/gemini-2.0-flash-live-001"
+
+        const val DEFAULT_SYSTEM_PROMPT = """You are a highly intelligent, warm, and empathetic personal AI assistant. You speak in a natural, conversational tone, like a knowledgeable best friend. Keep your responses concise but complete. Use natural speech patterns including brief acknowledgements ("Got it", "Sure", "Of course"). You understand context, emotion in the user's voice, and adapt your tone accordingly. You can handle any topic: information, analysis, creative writing, coding, math, and more."""
     }
 
     private val gson = Gson()
@@ -291,16 +293,5 @@ class GeminiLiveWebSocketClient {
             Log.w(TAG, "Disconnect error: ${e.message}")
         }
         webSocket = null
-    }
-
-    companion object {
-        val DEFAULT_SYSTEM_PROMPT = """
-            You are a highly intelligent, warm, and empathetic personal AI assistant.
-            You speak in a natural, conversational tone, like a knowledgeable best friend.
-            Keep your responses concise but complete. Use natural speech patterns including
-            brief acknowledgements ("Got it", "Sure", "Of course"). You understand context,
-            emotion in the user's voice, and adapt your tone accordingly. You can handle
-            any topic: information, analysis, creative writing, coding, math, and more.
-        """.trimIndent()
     }
 }

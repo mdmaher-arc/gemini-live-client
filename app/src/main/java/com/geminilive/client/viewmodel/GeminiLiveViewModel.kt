@@ -88,7 +88,7 @@ class GeminiLiveViewModel(application: Application) : AndroidViewModel(applicati
     private val _apiKey = MutableStateFlow("")
     val apiKey: StateFlow<String> = _apiKey.asStateFlow()
 
-    private val _systemPrompt = MutableStateFlow(GeminiLiveWebSocketClient.DEFAULT_SYSTEM_PROMPT)
+    private val _systemPrompt = MutableStateFlow<String>(GeminiLiveWebSocketClient.DEFAULT_SYSTEM_PROMPT)
     val systemPrompt: StateFlow<String> = _systemPrompt.asStateFlow()
 
     // Haptic vibrator
