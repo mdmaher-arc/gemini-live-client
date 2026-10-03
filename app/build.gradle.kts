@@ -4,6 +4,22 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// ── Release signing credentials ──────────────────────────────────────────────
+// Never hardcode signing passwords in version control. Supply them via CI
+// secrets (environment variables) or locally through the git-ignored
+// local.properties / -P Gradle properties:
+//     KEYSTORE_PASSWORD=...   KEY_PASSWORD=...   KEY_ALIAS=...
+val releaseKeystoreFile = file("release.keystore")
+val releaseStorePassword =
+    (project.findProperty("KEYSTORE_PASSWORD") as String?) ?: System.getenv("KEYSTORE_PASSWORD")
+val releaseKeyPassword =
+    ((project.findProperty("KEY_PASSWORD") as String?) ?: System.getenv("KEY_PASSWORD"))
+        ?: releaseStorePassword
+val releaseKeyAlias =
+    (project.findProperty("KEY_ALIAS") as String?) ?: System.getenv("KEY_ALIAS") ?: "gemini-live-key"
+val hasReleaseSigning =
+    releaseKeystoreFile.exists() && releaseStorePassword != null && releaseKeyPassword != null
+
 android {
     namespace = "com.geminilive.client"
     compileSdk = 35
@@ -12,8 +28,8 @@ android {
         applicationId = "com.geminilive.client"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 6
+        versionName = "1.0.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -23,12 +39,11 @@ android {
 
     signingConfigs {
         create("release") {
-            val ksFile = file("release.keystore")
-            if (ksFile.exists()) {
-                storeFile = ksFile
-                storePassword = "password123"
-                keyAlias = "virtualkey"
-                keyPassword = "password123"
+            if (hasReleaseSigning) {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     }
@@ -40,11 +55,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            val ksFile = file("release.keystore")
-            if (ksFile.exists()) {
-                signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
             } else {
-                signingConfig = signingConfigs.getByName("debug")
+                // No keystore or credentials available — fall back to debug
+                // signing so local release builds still succeed.
+                signingConfigs.getByName("debug")
             }
         }
         debug {

@@ -20,6 +20,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
@@ -70,9 +75,9 @@ import kotlin.math.sqrt
  *   thread. If user speech is detected while the speaker is playing,
  *   stopPlayback() is called locally in <1ms — zero cloud round-trip.
  *
- * TASK 7 — Real-Time FFT Audio Metering:
- *   After every captured PCM chunk, a lightweight DFT computes 64 bark-
- *   scale frequency bands. The magnitudes are emitted via [onFftData] for
+ * TASK 7 — Real-Time Spectrum Metering:
+ *   After every captured PCM chunk, a small filterbank computes 64 energy
+ *   bands. The magnitudes are emitted via [onSpectrumData] for
  *   the GPU-rendered waveform visualizer in Compose.
  */
 class GeminiAudioEngine(private val context: Context) {
@@ -92,24 +97,28 @@ class GeminiAudioEngine(private val context: Context) {
         const val PLAYBACK_CHANNELS = AudioFormat.CHANNEL_OUT_MONO
         const val PLAYBACK_ENCODING = AudioFormat.ENCODING_PCM_16BIT
 
-        // ── FFT config ───────────────────────────────────────────────────
-        const val FFT_SIZE = 512                       // Radix-2 FFT
-        const val FFT_BANDS = 64                       // Output bark-scale bands for visualizer
+        // ── Visualizer spectrum config ───────────────────────────────────
+        const val SPECTRUM_BANDS = 64                  // Output band count for visualizer
 
         // ── Barge-in VAD config ──────────────────────────────────────────
-        private const val BARGE_IN_RMS_THRESHOLD = 0.03f    // RMS energy to trigger barge-in
-        private const val BARGE_IN_CONSECUTIVE_FRAMES = 3   // 3 × 10ms = 30ms to confirm voice
+        private const val BARGE_IN_RMS_THRESHOLD = 0.15f    // High threshold — only detects user shouting, not AEC-filtered speaker echo
+        private const val BARGE_IN_CONSECUTIVE_FRAMES = 5   // 5 × 10ms = 50ms sustained voice to confirm barge-in
+        private const val BARGE_IN_WARMUP_MS = 400L         // 400ms grace period after playback starts
+        private const val POST_PLAYBACK_MUTE_MS = 400L      // 400ms echo cooldown after playback ends (let speaker echo die)
 
         // ── Turn-completion VAD config ────────────────────────────────────
-        private const val VAD_SPEECH_RMS_THRESHOLD = 0.014f // RMS energy to count as user speaking
-        private const val VAD_MIN_SPEECH_FRAMES = 6         // 6 × 10ms = 60ms to confirm intentional speech
-        private const val VAD_SILENCE_FRAMES = 50           // 50 × 10ms = 500ms of silence after speech to trigger turn
+        private const val VAD_SPEECH_RMS_THRESHOLD = 0.025f // Clear speech energy threshold
+        private const val VAD_MIN_SPEECH_FRAMES = 15        // 15 × 10ms = 150ms of sustained speech to confirm
+        private const val VAD_SILENCE_FRAMES = 75           // 75 × 10ms = 750ms silence after speech -> turnComplete
+        private const val PREROLL_BUFFER_FRAMES = 10        // 25 × 10ms = 250ms pre-speech audio buffer
     }
 
     // ── State flags ──────────────────────────────────────────────────────────
     @Volatile private var isCapturing = false
     @Volatile private var isPlayingBack = false
     @Volatile private var playbackDraining = false
+    @Volatile private var playbackStartTime = 0L
+    @Volatile private var playbackEndTime = 0L  // Timestamp when playback finished (for echo cooldown)
 
     // ── Android Audio objects ────────────────────────────────────────────────
     private var audioRecord: AudioRecord? = null
@@ -129,12 +138,13 @@ class GeminiAudioEngine(private val context: Context) {
     // ── Barge-in state ───────────────────────────────────────────────────────
     private var bargeInConsecutiveFrames = 0
 
+
     // ── Callbacks ────────────────────────────────────────────────────────────
     /** Called with batched 16-bit PCM samples for Gemini Live upload */
     var onPcmCaptured: ((ShortArray) -> Unit)? = null
 
-    /** Called every 10ms with 64 float FFT band magnitudes [0.0-1.0] for visualizer */
-    var onFftData: ((FloatArray, Float) -> Unit)? = null
+    /** Called every 10ms with 64 float energy-band magnitudes [0.0-1.0] for visualizer */
+    var onSpectrumData: ((FloatArray, Float) -> Unit)? = null
 
     /** Called when local barge-in is triggered — tells ViewModel to interrupt Gemini */
     var onBargeInDetected: (() -> Unit)? = null
@@ -160,44 +170,45 @@ class GeminiAudioEngine(private val context: Context) {
     fun startCapture() {
         if (isCapturing) return
 
-        // ── Route audio through telephony DSP for hardware AEC reference ──
+        // ── VOICE_COMMUNICATION mode: enables hardware AEC to cancel speaker echo ─
+        // MODE_IN_COMMUNICATION + VOICE_COMMUNICATION source is required for Android
+        // hardware AEC to work on MIUI. VOICE_RECOGNITION source disables hardware AEC.
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-        audioManager.isSpeakerphoneOn = true
+        audioManager.isSpeakerphoneOn = true  // Force main mic (bottom), not earpiece mic
 
-        // ── Open AudioRecord on VOICE_COMMUNICATION source ────────────────
-        // This source activates the hardware telephony AEC loopback reference,
-        // so the speaker reference signal is fed to the AEC chip automatically.
+        // ── Open AudioRecord on VOICE_RECOGNITION source ──────────────────
+        // VOICE_RECOGNITION is specifically designed by Android for speech-to-text / AI engines.
+        // It provides wideband uncompressed audio without telephony DSP distortion.
         val minBuf = AudioRecord.getMinBufferSize(
             CAPTURE_SAMPLE_RATE, CAPTURE_CHANNELS, CAPTURE_ENCODING
         )
-        val bufferSize = if (minBuf > 0) maxOf(minBuf * 2, CAPTURE_CHUNK_SAMPLES * 4) else 4096
+        val bufferSize = if (minBuf > 0) maxOf(minBuf * 2, CAPTURE_CHUNK_SAMPLES * 8) else 4096
 
         try {
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,  // Required for hardware AEC on MIUI
                 CAPTURE_SAMPLE_RATE,
                 CAPTURE_CHANNELS,
                 CAPTURE_ENCODING,
                 bufferSize
             )
         } catch (e: Exception) {
-            Log.w(TAG, "VOICE_COMMUNICATION init error: ${e.message}")
+            Log.w(TAG, "VOICE_COMMUNICATION init error: ${e.message}, falling back")
         }
 
         if (audioRecord == null || audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-            Log.w(TAG, "VOICE_COMMUNICATION not ready, falling back to MIC source")
+            Log.w(TAG, "VOICE_COMMUNICATION not ready, trying VOICE_RECOGNITION")
             try {
                 audioRecord = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
                     CAPTURE_SAMPLE_RATE,
                     CAPTURE_CHANNELS,
                     CAPTURE_ENCODING,
                     bufferSize
                 )
             } catch (e: Exception) {
-                Log.e(TAG, "MIC fallback init error: ${e.message}")
-                return
+                Log.w(TAG, "VOICE_RECOGNITION init error: ${e.message}")
             }
         }
 
@@ -260,27 +271,41 @@ class GeminiAudioEngine(private val context: Context) {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
 
             val chunk = ShortArray(CAPTURE_CHUNK_SAMPLES) // 160 samples = 10ms
-            val batchBuffer = ShortArray(800)             // 50ms batch (800 samples)
+            val batchBuffer = ShortArray(640)             // 40ms batch (640 samples)
             var batchPos = 0
+
+            // Pre-roll ring buffer: saves the last 250ms of audio
+            val prerollCapacity = PREROLL_BUFFER_FRAMES * CAPTURE_CHUNK_SAMPLES
+            val prerollRing = ShortArray(prerollCapacity)
+            var prerollHead = 0
 
             var userVoiceFrames = 0
             var userSilenceFrames = 0
             var isUserSpeaking = false
+            var noiseFloor = 0.006f
+            var frameCount = 0
+
 
             while (isActive && isCapturing) {
                 val read = record.read(chunk, 0, CAPTURE_CHUNK_SAMPLES)
                 if (read <= 0) continue
 
-                // ── TASK 2c: Software RMS Normalization ───────────────────
                 val rms = calculateRms(chunk, read)
-                val normalizedChunk = softNormalize(chunk, read, rms)
                 onCaptureLevel?.invoke(rms)
+                frameCount++
+
+                // Log RMS every ~500ms so we can see if mic is actually picking up sound
+                if (frameCount % 50 == 0) {
+                    Log.d(TAG, "MIC RMS=$rms | noiseFloor=$noiseFloor | speaking=$isUserSpeaking | voiceFrames=$userVoiceFrames")
+                }
+
 
                 // ── TASK 6: Local Barge-In VAD Gate (while Gemini is speaking) ────
-                if (isPlayingBack && rms > BARGE_IN_RMS_THRESHOLD) {
+                val timeSincePlaybackStart = System.currentTimeMillis() - playbackStartTime
+                if (isPlayingBack && timeSincePlaybackStart > BARGE_IN_WARMUP_MS && rms > BARGE_IN_RMS_THRESHOLD) {
                     bargeInConsecutiveFrames++
                     if (bargeInConsecutiveFrames >= BARGE_IN_CONSECUTIVE_FRAMES) {
-                        Log.d(TAG, "Barge-in detected! RMS=$rms → stopping local playback instantly")
+                        Log.d(TAG, "Deliberate barge-in detected! RMS=$rms → stopping local playback")
                         stopPlayback() // LOCAL kill — zero cloud round-trip
                         bargeInConsecutiveFrames = 0
                         onBargeInDetected?.invoke()
@@ -289,15 +314,41 @@ class GeminiAudioEngine(private val context: Context) {
                     bargeInConsecutiveFrames = 0
                 }
 
+                // ── Adaptive Noise Floor ──────────────────────────────────────────
+                if (!isPlayingBack && !isUserSpeaking && rms < VAD_SPEECH_RMS_THRESHOLD) {
+                    noiseFloor = noiseFloor * 0.99f + rms * 0.01f
+                }
+                val dynamicThreshold = maxOf(VAD_SPEECH_RMS_THRESHOLD, noiseFloor * 2.5f)
+
+                // ── Always store into circular pre-roll buffer ───────────────────
+                if (!isUserSpeaking) {
+                    for (i in 0 until read) {
+                        prerollRing[(prerollHead + i) % prerollCapacity] = chunk[i]
+                    }
+                    prerollHead = (prerollHead + read) % prerollCapacity
+                }
+
                 // ── Local VAD: Detect speech start & silence turn completion ──────
-                if (!isPlayingBack) {
-                    if (rms > VAD_SPEECH_RMS_THRESHOLD) {
+                // Gate: skip during playback AND during echo cooldown window after playback
+                val echoSilenced = System.currentTimeMillis() - playbackEndTime < POST_PLAYBACK_MUTE_MS
+                if (!isPlayingBack && !echoSilenced) {
+                    if (rms > dynamicThreshold) {
                         userVoiceFrames++
                         userSilenceFrames = 0
+
                         if (userVoiceFrames >= VAD_MIN_SPEECH_FRAMES && !isUserSpeaking) {
                             isUserSpeaking = true
-                            Log.d(TAG, "VAD: User speech started (RMS=$rms)")
+
+                            Log.d(TAG, "VAD: Speech CONFIRMED (RMS=$rms, floor=$noiseFloor). Emitting 250ms pre-roll.")
                             onUserSpeechStarted?.invoke()
+
+                            // Flush pre-roll buffer so the very beginning of the word is sent
+                            val flushedPreroll = ShortArray(prerollCapacity)
+                            for (i in 0 until prerollCapacity) {
+                                flushedPreroll[i] = prerollRing[(prerollHead + i) % prerollCapacity]
+                            }
+                            onPcmCaptured?.invoke(flushedPreroll)
+                            batchPos = 0
                         }
                     } else {
                         if (isUserSpeaking) {
@@ -306,8 +357,10 @@ class GeminiAudioEngine(private val context: Context) {
                                 isUserSpeaking = false
                                 userVoiceFrames = 0
                                 userSilenceFrames = 0
-                                Log.d(TAG, "VAD: User pause detected ($VAD_SILENCE_FRAMES frames silence) → onSpeechFinished")
-                                // Flush any remainder in batch buffer
+
+                                Log.d(TAG, "VAD: Turn completed after ${VAD_SILENCE_FRAMES * 10}ms silence")
+
+                                // Flush any remaining audio in batch
                                 if (batchPos > 0) {
                                     val flushBatch = batchBuffer.copyOf(batchPos)
                                     batchPos = 0
@@ -316,24 +369,29 @@ class GeminiAudioEngine(private val context: Context) {
                                 onSpeechFinished?.invoke()
                             }
                         } else {
-                            userVoiceFrames = 0
+                            // User wasn't confirmed speaking; reset false triggers (coughs, taps)
+                            if (userVoiceFrames > 0) {
+                                userVoiceFrames = maxOf(0, userVoiceFrames - 2)
+                            }
                         }
                     }
                 }
 
-                // ── TASK 4: Batch PCM chunks (50ms) for high-efficiency WebSocket transport ──
-                val toCopy = minOf(read, batchBuffer.size - batchPos)
-                System.arraycopy(normalizedChunk, 0, batchBuffer, batchPos, toCopy)
-                batchPos += toCopy
-                if (batchPos >= batchBuffer.size) {
-                    val batch = batchBuffer.clone()
-                    batchPos = 0
-                    onPcmCaptured?.invoke(batch)
+                // ── Stream audio continuously while user is speaking ─────────────
+                if (isUserSpeaking) {
+                    val toCopy = minOf(read, batchBuffer.size - batchPos)
+                    System.arraycopy(chunk, 0, batchBuffer, batchPos, toCopy)
+                    batchPos += toCopy
+                    if (batchPos >= batchBuffer.size) {
+                        val batch = batchBuffer.clone()
+                        batchPos = 0
+                        onPcmCaptured?.invoke(batch)
+                    }
                 }
 
-                // ── TASK 7: Real-Time FFT for Visualizer ─────────────────
-                val fftBands = computeFftBands(normalizedChunk, read)
-                onFftData?.invoke(fftBands, rms)
+                // ── TASK 7: Real-Time spectrum for Visualizer ────────────
+                val bands = computeEnergyBands(chunk, read)
+                onSpectrumData?.invoke(bands, rms)
             }
 
             Log.d(TAG, "Capture coroutine exited cleanly")
@@ -439,6 +497,7 @@ class GeminiAudioEngine(private val context: Context) {
     private fun startPlaybackWorker() {
         if (isPlayingBack) return
         isPlayingBack = true
+        playbackStartTime = System.currentTimeMillis()
         streamEnded = false
 
         val track = audioTrack
@@ -493,6 +552,7 @@ class GeminiAudioEngine(private val context: Context) {
                         if (playbackQueue.isEmpty() && isPlayingBack) {
                             Log.d(TAG, "Playback fully drained (written=$totalSamplesWritten, head=$headPos)")
                             isPlayingBack = false
+                            playbackEndTime = System.currentTimeMillis()  // Start echo cooldown
                             streamEnded = false
                             onPlaybackFinished?.invoke()
                             break
@@ -513,6 +573,7 @@ class GeminiAudioEngine(private val context: Context) {
     @Synchronized
     fun stopPlayback() {
         isPlayingBack = false
+        playbackEndTime = System.currentTimeMillis()  // Start echo cooldown
         streamEnded = false
         playbackJob?.cancel()
         playbackJob = null
@@ -525,23 +586,29 @@ class GeminiAudioEngine(private val context: Context) {
         } catch (e: Exception) {
             Log.w(TAG, "AudioTrack flush error: ${e.message}")
         }
+        Log.d(TAG, "Playback stopped — echo cooldown started")
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // TASK 7: Real-Time FFT Computation (DFT → 64 Bark-Scale Bands)
+    // TASK 7: Real-Time Spectrum Computation (64 Perceptual Energy Bands)
     // ═════════════════════════════════════════════════════════════════════════
 
     /**
      * High-speed O(N) perceptual energy filterbank.
-     * Computes 64 frequency/energy bands from 160 PCM samples in <0.01ms,
-     * completely eliminating CPU audio stalls.
+     *
+     * This is intentionally NOT an FFT or DFT. It splits the PCM frame into
+     * sequential index buckets and weights each one by its RMS energy scaled by
+     * its zero-crossing rate. That is a good-enough proxy for "how loud is this
+     * and how bright does it sound" at a fraction of the CPU cost of a real
+     * transform, which is all the visualizer needs — and it keeps the capture
+     * thread free of stalls.
      */
-    private fun computeFftBands(pcm: ShortArray, length: Int): FloatArray {
-        val bands = FloatArray(FFT_BANDS)
+    private fun computeEnergyBands(pcm: ShortArray, length: Int): FloatArray {
+        val bands = FloatArray(SPECTRUM_BANDS)
         if (length <= 0) return bands
 
-        val samplesPerBand = maxOf(1, length / FFT_BANDS)
-        for (b in 0 until FFT_BANDS) {
+        val samplesPerBand = maxOf(1, length / SPECTRUM_BANDS)
+        for (b in 0 until SPECTRUM_BANDS) {
             val start = (b * samplesPerBand).coerceAtMost(length - 1)
             val end = ((b + 1) * samplesPerBand).coerceAtMost(length)
             var sumSquare = 0.0
@@ -580,10 +647,11 @@ class GeminiAudioEngine(private val context: Context) {
      * Mirrors what Android's AGC and Google's server-side audio normalization does.
      */
     private fun softNormalize(buf: ShortArray, len: Int, rms: Float): ShortArray {
-        if (rms <= 0.001f) return buf
-        val targetRms = 0.1f
-        val gain = (targetRms / rms).coerceIn(0.5f, 4.0f)
-        if (abs(gain - 1f) < 0.05f) return buf // Skip if barely needed
+        // Only normalize clearly audible speech — do NOT amplify noise/silence
+        if (rms <= 0.03f) return buf  // Below speech level — return as-is, no amplification
+        val targetRms = 0.12f
+        val gain = (targetRms / rms).coerceIn(0.8f, 1.8f) // Tight range — never boost more than 1.8×
+        if (abs(gain - 1f) < 0.1f) return buf
         val out = ShortArray(len)
         for (i in 0 until len) {
             out[i] = (buf[i].toFloat() * gain).coerceIn(-32767f, 32767f).toInt().toShort()

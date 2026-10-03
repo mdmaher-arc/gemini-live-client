@@ -26,9 +26,42 @@ jobs:
           sed -i 's/\r$//' gradlew
           chmod +x gradlew
 
-      - name: Generate Release Keystore
+      - name: Generate or restore Release Keystore
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
-          keytool -genkey -v -keystore app/release.keystore -alias virtualkey -keyalg RSA -keysize 2048 -validity 10000 -storepass password123 -keypass password123 -dname "CN=GeminiLiveClient, OU=AI, O=GeminiLive, L=City, S=State, C=US"
+          set -euo pipefail
+
+          # Prefer a pre-existing keystore supplied as a base64 secret so the
+          # signing identity stays stable across builds.
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > app/release.keystore
+            echo "Restored existing keystore from secret."
+          else
+            # No stored keystore — generate an ephemeral one. Never fall back to
+            # a hardcoded password; use a random one if no secret is configured.
+            if [ -z "${KEYSTORE_PASSWORD:-}" ]; then
+              KEYSTORE_PASSWORD="$(openssl rand -base64 24)"
+              echo "::warning::KEYSTORE_PASSWORD secret not set — using a random password. Set it to keep a stable signing key."
+            fi
+            keytool -genkey -v -keystore app/release.keystore \
+              -alias "${KEY_ALIAS:-gemini-live-key}" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "${KEY_PASSWORD:-$KEYSTORE_PASSWORD}" \
+              -dname "CN=GeminiLiveClient, OU=AI, O=GeminiLive, L=City, S=State, C=US"
+            echo "Generated new keystore."
+          fi
+
+          # Export to later steps so Gradle can read them from the environment.
+          {
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "KEY_PASSWORD=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+            echo "KEY_ALIAS=${KEY_ALIAS:-gemini-live-key}"
+          } >> "$GITHUB_ENV"
 
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace

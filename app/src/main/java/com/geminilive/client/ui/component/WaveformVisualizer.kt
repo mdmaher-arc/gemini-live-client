@@ -20,7 +20,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
-import com.geminilive.client.data.FftData
+import com.geminilive.client.data.SpectrumData
 import com.geminilive.client.data.SessionState
 import com.geminilive.client.ui.theme.AccentEnd
 import com.geminilive.client.ui.theme.AccentMid
@@ -34,19 +34,19 @@ import kotlin.math.sin
  * REAL-TIME WAVEFORM VISUALIZER — GPU Canvas
  * ═══════════════════════════════════════════════════════════════════════════
  *
- * TASK 7: Renders the 64 FFT frequency bands as a radial waveform (orb).
+ * TASK 7: Renders the 64 perceptual energy bands as a radial waveform (orb).
  * Runs entirely on the GPU via Compose Canvas — zero CPU compositing cost.
  *
  * Modes:
  *   IDLE → Gently pulsing orb (breathing animation)
- *   LISTENING → Spiky polar FFT bars responding to user voice
+ *   LISTENING → Spiky polar band bars responding to user voice
  *   THINKING → Rotating orbital rings
  *   SPEAKING → Fluid sine wave bars responding to AI audio
  *   ERROR → Red pulse
  */
 @Composable
 fun WaveformVisualizer(
-    fftData: FftData,
+    spectrumData: SpectrumData,
     sessionState: SessionState,
     captureLevel: Float,
     playbackLevel: Float,
@@ -95,10 +95,10 @@ fun WaveformVisualizer(
                 }
             }
             SessionState.LISTENING -> {
-                drawListeningWave(cx, cy, maxRadius, fftData, captureLevel, colors)
+                drawListeningWave(cx, cy, maxRadius, spectrumData, captureLevel, colors)
             }
             SessionState.SPEAKING -> {
-                drawSpeakingWave(cx, cy, maxRadius, fftData, playbackLevel, colors)
+                drawSpeakingWave(cx, cy, maxRadius, spectrumData, playbackLevel, colors)
             }
             SessionState.ERROR -> {
                 drawBreathingOrb(cx, cy, maxRadius * 0.6f * breathe, colors)
@@ -150,12 +150,12 @@ private fun DrawScope.drawOrbitalRings(
     )
 }
 
-// ── LISTENING: Radial polar waveform driven by mic FFT ───────────────────────
+// ── LISTENING: Radial polar waveform driven by mic spectrum bands ─────────────
 private fun DrawScope.drawListeningWave(
     cx: Float, cy: Float, maxRadius: Float,
-    fftData: FftData, level: Float, colors: List<Color>
+    spectrumData: SpectrumData, level: Float, colors: List<Color>
 ) {
-    val bands = fftData.bands
+    val bands = spectrumData.bands
     val numBands = bands.size.coerceAtLeast(1)
     val baseRadius = maxRadius * 0.38f
     val maxSpike = maxRadius * 0.55f
@@ -207,9 +207,9 @@ private fun DrawScope.drawListeningWave(
 // ── SPEAKING: Fluid sine-based wave driven by speaker audio ──────────────────
 private fun DrawScope.drawSpeakingWave(
     cx: Float, cy: Float, maxRadius: Float,
-    fftData: FftData, level: Float, colors: List<Color>
+    spectrumData: SpectrumData, level: Float, colors: List<Color>
 ) {
-    val bands = fftData.bands
+    val bands = spectrumData.bands
     val numBands = bands.size.coerceAtLeast(1)
     val baseRadius = maxRadius * 0.42f
 

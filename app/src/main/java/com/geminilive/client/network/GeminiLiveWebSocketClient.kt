@@ -22,7 +22,8 @@ import java.util.concurrent.TimeUnit
  * GEMINI LIVE MULTIMODAL API — FULL-DUPLEX WEBSOCKET CLIENT
  * ═══════════════════════════════════════════════════════════════════════════
  *
- * Implements the Gemini 2.0 Flash Multimodal Live API bidirectional WebSocket protocol.
+ * Implements the Gemini Live Multimodal API bidirectional WebSocket protocol.
+ * The concrete model ID lives in [DEFAULT_MODEL] / [EXTENDED_THINKING_MODEL].
  *
  * Endpoint:
  *   wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}
@@ -41,9 +42,23 @@ class GeminiLiveWebSocketClient {
         private const val TAG = "GeminiWS"
         private const val GEMINI_WS_BASE = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
         
-        // Official Gemini Multimodal Live API model IDs
+        // ── Official Gemini Live API model IDs ───────────────────────────────
+        // Verified against ai.google.dev/gemini-api/docs/models → Live API.
         const val DEFAULT_MODEL = "models/gemini-3.8-live"
-        const val FALLBACK_MODEL = "models/gemini-3.8-live"
+        const val EXTENDED_THINKING_MODEL = "models/gemini-3.8-live-extended-thinking"
+
+        /**
+         * The models this client knows how to talk to. Used to validate persisted
+         * settings, so a stale value written by an older app version (for example
+         * the retired `gemini-2.0-flash-exp`) can never be sent to the server.
+         */
+        val SUPPORTED_MODELS: List<String> = listOf(DEFAULT_MODEL, EXTENDED_THINKING_MODEL)
+
+        /**
+         * Model used for the single automatic retry when the server rejects the
+         * requested model. Deliberately different from [DEFAULT_MODEL].
+         */
+        const val FALLBACK_MODEL = EXTENDED_THINKING_MODEL
 
         const val DEFAULT_SYSTEM_PROMPT = """You are a highly intelligent, warm, and empathetic personal AI assistant. You speak in a natural, conversational tone, like a knowledgeable best friend. Keep your responses concise but complete. Use natural speech patterns including brief acknowledgements ("Got it", "Sure", "Of course"). You understand context, emotion in the user's voice, and adapt your tone accordingly. You can handle any topic: information, analysis, creative writing, coding, math, and more."""
     }
@@ -65,6 +80,9 @@ class GeminiLiveWebSocketClient {
     private var modelId: String = DEFAULT_MODEL
     private var voiceName: String = "Puck"
     private var userInitiatedDisconnect = false
+
+    /** Guards the one-shot retry with [FALLBACK_MODEL] so we can never loop. */
+    private var hasRetriedWithFallback = false
 
     // ── Callbacks ────────────────────────────────────────────────────────────
     var onConnected: (() -> Unit)? = null
@@ -99,19 +117,26 @@ class GeminiLiveWebSocketClient {
         val cleanKey = apiKey.trim().replace("\n", "").replace("\r", "").replace("\"", "")
         this.apiKey = cleanKey
         this.systemPrompt = systemPrompt
-        // Auto-migrate legacy 2.0 models to official 3.8 Live model
-        val resolvedModel = if (model.isBlank() || model.contains("2.0") || model.contains("flash-exp")) {
-            DEFAULT_MODEL
-        } else {
-            model
-        }
-        this.modelId = resolvedModel
+        this.modelId = resolveModel(model)
         this.voiceName = if (voice.isNotBlank()) voice else "Puck"
-        this.userInitiatedDisconnect = false
 
+        // Close any previous socket first, then clear the flags. Order matters:
+        // disconnect() itself sets userInitiatedDisconnect = true, so resetting
+        // before it would make an unexpected close look like a clean exit.
         disconnect()
+        this.userInitiatedDisconnect = false
+        this.hasRetriedWithFallback = false
 
-        val url = "$GEMINI_WS_BASE?key=$cleanKey"
+        openSocket()
+    }
+
+    /**
+     * Opens the WebSocket using the current [apiKey], [modelId] and [systemPrompt].
+     * Separate from [connect] so that [retryWithFallback] can reopen the socket
+     * without resetting the retry guard.
+     */
+    private fun openSocket() {
+        val url = "$GEMINI_WS_BASE?key=$apiKey"
         Log.d(TAG, "Connecting to Gemini Live WebSocket (model=$modelId, voice=$voiceName)...")
 
         val request = Request.Builder()
@@ -147,6 +172,11 @@ class GeminiLiveWebSocketClient {
                 Log.w(TAG, "WebSocket closed: code=$code, reason='$reason'")
                 webSocket = null
                 if (!userInitiatedDisconnect) {
+                    // Code 1008 is what the server sends when it refuses our setup
+                    // frame — usually because the requested model is unavailable.
+                    // Retry once with the fallback model before surfacing an error.
+                    if (code == 1008 && retryWithFallback()) return
+
                     val errorDetail = formatClosureError(code, reason)
                     onError?.invoke(errorDetail)
                 } else {
@@ -176,9 +206,54 @@ class GeminiLiveWebSocketClient {
                 }
                 Log.e(TAG, "WebSocket failure: $detail", t)
                 webSocket = null
+
+                // A 404, or an explicit "model … not found" body, means the model we
+                // asked for is unavailable — retry once with the fallback model.
+                if (!userInitiatedDisconnect &&
+                    indicatesModelRejected(code, errBody) &&
+                    retryWithFallback()
+                ) {
+                    return
+                }
+
                 onError?.invoke(detail)
             }
         })
+    }
+
+    /**
+     * Returns [model] when it is one of [SUPPORTED_MODELS], otherwise [DEFAULT_MODEL].
+     *
+     * This replaces the previous substring check, which silently rewrote values it
+     * did not recognise and could also mangle a perfectly valid model name.
+     */
+    private fun resolveModel(model: String): String {
+        val normalized = model.trim()
+        return if (normalized in SUPPORTED_MODELS) normalized else DEFAULT_MODEL
+    }
+
+    /** True when an error response indicates the requested model is unavailable. */
+    private fun indicatesModelRejected(code: Int?, body: String?): Boolean {
+        if (code == 404) return true
+        if (body.isNullOrBlank()) return false
+        val lower = body.lowercase()
+        return lower.contains("model") &&
+            (lower.contains("not found") || lower.contains("not supported") || lower.contains("unsupported"))
+    }
+
+    /**
+     * Reopens the socket against [FALLBACK_MODEL]. Performs at most one retry per
+     * connection attempt, and never retries onto the model that just failed.
+     *
+     * @return true when a retry was started, so the caller can skip its error path.
+     */
+    private fun retryWithFallback(): Boolean {
+        if (hasRetriedWithFallback || modelId == FALLBACK_MODEL) return false
+        hasRetriedWithFallback = true
+        modelId = FALLBACK_MODEL
+        Log.w(TAG, "Model rejected — retrying once with fallback model $FALLBACK_MODEL")
+        openSocket()
+        return true
     }
 
     private fun formatClosureError(code: Int, reason: String): String {

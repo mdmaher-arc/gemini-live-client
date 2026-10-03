@@ -1,8 +1,5 @@
 package com.geminilive.client.ui.screen
 
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,8 +19,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Visibility
@@ -52,7 +47,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.geminilive.client.data.AiProvider
 import com.geminilive.client.network.GeminiLiveWebSocketClient
+import com.geminilive.client.network.GroqVoiceClient
 import com.geminilive.client.ui.theme.AccentEnd
 import com.geminilive.client.ui.theme.AccentMid
 import com.geminilive.client.ui.theme.AccentStart
@@ -62,7 +59,6 @@ import com.geminilive.client.ui.theme.DarkCard
 import com.geminilive.client.ui.theme.DarkSubtext
 import com.geminilive.client.ui.theme.DarkText
 import com.geminilive.client.ui.theme.GeminiGreen
-import com.geminilive.client.ui.theme.GeminiRed
 import com.geminilive.client.viewmodel.GeminiLiveViewModel
 
 @Composable
@@ -70,29 +66,47 @@ fun SettingsScreen(
     viewModel: GeminiLiveViewModel,
     onBack: () -> Unit
 ) {
+    val activeProvider by viewModel.provider.collectAsState()
     val savedApiKey by viewModel.apiKey.collectAsState()
     val savedPrompt by viewModel.systemPrompt.collectAsState()
     val savedModel by viewModel.modelId.collectAsState()
     val savedVoice by viewModel.voiceName.collectAsState()
 
+    val savedGroqKey by viewModel.groqApiKey.collectAsState()
+    val savedGroqLlm by viewModel.groqLlmModel.collectAsState()
+    val savedGroqWhisper by viewModel.groqWhisperModel.collectAsState()
+
+    var selectedProvider by remember(activeProvider) { mutableStateOf(activeProvider) }
     var apiKeyText by remember(savedApiKey) { mutableStateOf(savedApiKey) }
     var promptText by remember(savedPrompt) { mutableStateOf(savedPrompt) }
     var selectedModel by remember(savedModel) { mutableStateOf(savedModel) }
     var selectedVoice by remember(savedVoice) { mutableStateOf(savedVoice) }
 
-    var apiKeyVisible by remember { mutableStateOf(false) }
-    var saveStatus by remember { mutableStateOf<String?>(null) }
+    var groqKeyText by remember(savedGroqKey) { mutableStateOf(savedGroqKey) }
+    var selectedGroqLlm by remember(savedGroqLlm) { mutableStateOf(savedGroqLlm) }
+    var selectedGroqWhisper by remember(savedGroqWhisper) { mutableStateOf(savedGroqWhisper) }
 
-    val hasHardwareAec = remember { AcousticEchoCanceler.isAvailable() }
-    val hasHardwareNs = remember { NoiseSuppressor.isAvailable() }
-    val hasHardwareAgc = remember { AutomaticGainControl.isAvailable() }
+    var apiKeyVisible by remember { mutableStateOf(false) }
+    var groqKeyVisible by remember { mutableStateOf(false) }
+    var saveStatus by remember { mutableStateOf<String?>(null) }
 
     val scrollState = rememberScrollState()
 
     val voices = listOf("Puck", "Aoede", "Charon", "Fenrir", "Kore")
-    val models = listOf(
+    val geminiModels = listOf(
         "models/gemini-3.8-live" to "Gemini 3.8 Live (Official Live Audio)",
         "models/gemini-3.8-live-extended-thinking" to "Gemini 3.8 Live (Extended Thinking)"
+    )
+
+    val groqLlmModels = listOf(
+        "llama-3.3-70b-versatile" to "Llama 3.3 70B (Fast & Intelligent)",
+        "llama-3.1-8b-instant" to "Llama 3.1 8B (Ultra Low Latency)",
+        "mixtral-8x7b-32768" to "Mixtral 8x7B (MoE)"
+    )
+
+    val groqWhisperModels = listOf(
+        "whisper-large-v3-turbo" to "Whisper Large v3 Turbo (216x Real-Time Speed)",
+        "whisper-large-v3" to "Whisper Large v3 (Maximum Accuracy)"
     )
 
     Box(
@@ -118,7 +132,7 @@ fun SettingsScreen(
                 }
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    text = "Settings & Architecture",
+                    text = "Assistant Settings",
                     color = DarkText,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold
@@ -127,156 +141,299 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(20.dp))
 
-            // ── SECTION 1: Google Gemini API Credentials ─────────────────
+            // ── SECTION 1: AI Engine Provider ────────────────────────────
             Text(
-                text = "GEMINI LIVE API CREDENTIALS",
-                color = AccentStart,
+                text = "VOICE AI ENGINE",
+                color = AccentEnd,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 letterSpacing = 1.sp
             )
-            Spacer(Modifier.height(8.dp))
-
-            OutlinedTextField(
-                value = apiKeyText,
-                onValueChange = { apiKeyText = it },
-                label = { Text("Google AI Studio API Key", color = DarkSubtext) },
-                placeholder = { Text("AIzaSy...", color = DarkSubtext.copy(alpha = 0.5f)) },
-                visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                trailingIcon = {
-                    IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
-                        Icon(
-                            imageVector = if (apiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                            contentDescription = "Toggle API Key Visibility",
-                            tint = DarkSubtext
-                        )
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = DarkText,
-                    unfocusedTextColor = DarkText,
-                    focusedBorderColor = AccentStart,
-                    unfocusedBorderColor = DarkBorder,
-                    focusedContainerColor = DarkCard,
-                    unfocusedContainerColor = DarkCard
-                ),
-                shape = RoundedCornerShape(12.dp),
-                singleLine = true
-            )
-
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "• Obtain a free key from https://aistudio.google.com/\n• Full-duplex bidirectional streaming via WebSocket",
-                color = DarkSubtext,
-                fontSize = 12.sp,
-                lineHeight = 16.sp
-            )
-
-            Spacer(Modifier.height(20.dp))
-
-            // ── SECTION 2: Model Selection ───────────────────────────────
-            Text(
-                text = "MULTIMODAL LIVE MODEL",
-                color = AccentStart,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 1.sp
-            )
-            Spacer(Modifier.height(8.dp))
-
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                models.forEach { (id, label) ->
-                    val isSelected = selectedModel == id
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) AccentStart.copy(alpha = 0.2f) else DarkCard)
-                            .border(
-                                1.dp,
-                                if (isSelected) AccentStart else DarkBorder,
-                                RoundedCornerShape(12.dp)
-                            )
-                            .clickable { selectedModel = id }
-                            .padding(horizontal = 14.dp, vertical = 10.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column {
-                                Text(
-                                    text = label,
-                                    color = if (isSelected) Color.White else DarkText,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Text(text = id, color = DarkSubtext, fontSize = 11.sp)
-                            }
-                            if (isSelected) {
-                                Icon(
-                                    Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    tint = AccentStart,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(20.dp))
-
-            // ── SECTION 3: Voice Selection ───────────────────────────────
-            Text(
-                text = "AI VOICE SELECTION",
-                color = AccentMid,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 1.sp
-            )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(10.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                voices.forEach { voice ->
-                    val isSelected = selectedVoice == voice
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = { selectedVoice = voice },
-                        label = { Text(voice, fontSize = 12.sp) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = AccentMid,
-                            selectedLabelColor = Color.White,
-                            containerColor = DarkCard,
-                            labelColor = DarkText
-                        ),
-                        border = FilterChipDefaults.filterChipBorder(
-                            enabled = true,
-                            selected = isSelected,
-                            borderColor = DarkBorder,
-                            selectedBorderColor = AccentMid
+                FilterChip(
+                    selected = selectedProvider == AiProvider.GROQ,
+                    onClick = { selectedProvider = AiProvider.GROQ },
+                    label = { Text("⚡ Groq Voice (Whisper + Llama)") },
+                    modifier = Modifier.weight(1f),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = AccentStart,
+                        selectedLabelColor = Color.White,
+                        containerColor = DarkCard,
+                        labelColor = DarkSubtext
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                FilterChip(
+                    selected = selectedProvider == AiProvider.GEMINI,
+                    onClick = { selectedProvider = AiProvider.GEMINI },
+                    label = { Text("✨ Gemini Live (WebSocket)") },
+                    modifier = Modifier.weight(1f),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = AccentStart,
+                        selectedLabelColor = Color.White,
+                        containerColor = DarkCard,
+                        labelColor = DarkSubtext
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                )
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // ── PROVIDER-SPECIFIC SETTINGS ───────────────────────────────
+            if (selectedProvider == AiProvider.GROQ) {
+                // ── GROQ SETTINGS ────────────────────────────────────────
+                Text(
+                    text = "GROQ API CREDENTIALS",
+                    color = AccentEnd,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Get your free API key at console.groq.com/keys",
+                    color = DarkSubtext,
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(10.dp))
+
+                OutlinedTextField(
+                    value = groqKeyText,
+                    onValueChange = { groqKeyText = it },
+                    label = { Text("Groq API Key (gsk_...)", color = DarkSubtext) },
+                    visualTransformation = if (groqKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { groqKeyVisible = !groqKeyVisible }) {
+                            Icon(
+                                if (groqKeyVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                contentDescription = "Toggle key",
+                                tint = DarkSubtext
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = DarkText,
+                        unfocusedTextColor = DarkText,
+                        focusedBorderColor = AccentMid,
+                        unfocusedBorderColor = DarkBorder,
+                        focusedContainerColor = DarkCard,
+                        unfocusedContainerColor = DarkCard
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+
+                Spacer(Modifier.height(20.dp))
+
+                Text(
+                    text = "GROQ LLM MODEL (BRAIN)",
+                    color = AccentEnd,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(8.dp))
+
+                groqLlmModels.forEach { (modelId, desc) ->
+                    val isSelected = selectedGroqLlm == modelId
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isSelected) AccentStart.copy(alpha = 0.15f) else DarkCard)
+                            .border(
+                                width = if (isSelected) 1.5.dp else 1.dp,
+                                color = if (isSelected) AccentStart else DarkBorder,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .clickable { selectedGroqLlm = modelId }
+                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                    ) {
+                        Column {
+                            Text(
+                                text = modelId,
+                                color = if (isSelected) Color.White else DarkText,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            Text(text = desc, color = DarkSubtext, fontSize = 11.sp)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(20.dp))
+
+                Text(
+                    text = "GROQ SPEECH-TO-TEXT MODEL (EARS)",
+                    color = AccentEnd,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(8.dp))
+
+                groqWhisperModels.forEach { (modelId, desc) ->
+                    val isSelected = selectedGroqWhisper == modelId
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isSelected) AccentStart.copy(alpha = 0.15f) else DarkCard)
+                            .border(
+                                width = if (isSelected) 1.5.dp else 1.dp,
+                                color = if (isSelected) AccentStart else DarkBorder,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .clickable { selectedGroqWhisper = modelId }
+                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                    ) {
+                        Column {
+                            Text(
+                                text = modelId,
+                                color = if (isSelected) Color.White else DarkText,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            Text(text = desc, color = DarkSubtext, fontSize = 11.sp)
+                        }
+                    }
+                }
+            } else {
+                // ── GEMINI SETTINGS ──────────────────────────────────────
+                Text(
+                    text = "GOOGLE AI STUDIO API KEY",
+                    color = AccentEnd,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Get your free key from aistudio.google.com",
+                    color = DarkSubtext,
+                    fontSize = 11.sp
+                )
+                Spacer(Modifier.height(10.dp))
+
+                OutlinedTextField(
+                    value = apiKeyText,
+                    onValueChange = { apiKeyText = it },
+                    label = { Text("Gemini API Key", color = DarkSubtext) },
+                    visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
+                            Icon(
+                                if (apiKeyVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                contentDescription = "Toggle key",
+                                tint = DarkSubtext
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = DarkText,
+                        unfocusedTextColor = DarkText,
+                        focusedBorderColor = AccentMid,
+                        unfocusedBorderColor = DarkBorder,
+                        focusedContainerColor = DarkCard,
+                        unfocusedContainerColor = DarkCard
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+
+                Spacer(Modifier.height(20.dp))
+
+                Text(
+                    text = "GEMINI LIVE MODEL",
+                    color = AccentEnd,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(8.dp))
+
+                geminiModels.forEach { (modelId, desc) ->
+                    val isSelected = selectedModel == modelId
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isSelected) AccentStart.copy(alpha = 0.15f) else DarkCard)
+                            .border(
+                                width = if (isSelected) 1.5.dp else 1.dp,
+                                color = if (isSelected) AccentStart else DarkBorder,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .clickable { selectedModel = modelId }
+                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                    ) {
+                        Column {
+                            Text(
+                                text = modelId,
+                                color = if (isSelected) Color.White else DarkText,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            Text(text = desc, color = DarkSubtext, fontSize = 11.sp)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(20.dp))
+
+                Text(
+                    text = "GEMINI VOICE",
+                    color = AccentEnd,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    voices.forEach { voice ->
+                        FilterChip(
+                            selected = selectedVoice == voice,
+                            onClick = { selectedVoice = voice },
+                            label = { Text(voice) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = AccentStart,
+                                selectedLabelColor = Color.White,
+                                containerColor = DarkCard,
+                                labelColor = DarkSubtext
+                            ),
+                            shape = RoundedCornerShape(10.dp)
                         )
-                    )
+                    }
                 }
             }
 
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(24.dp))
 
-            // ── SECTION 4: System Instruction ────────────────────────────
+            // ── SYSTEM PROMPT ────────────────────────────────────────────
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "AI PERSONA & SYSTEM INSTRUCTION",
-                    color = AccentMid,
+                    text = "SYSTEM INSTRUCTION",
+                    color = AccentEnd,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 1.sp
@@ -313,82 +470,21 @@ fun SettingsScreen(
                 shape = RoundedCornerShape(12.dp)
             )
 
-            Spacer(Modifier.height(20.dp))
-
-            // ── SECTION 5: Hardware Audio Diagnostics ────────────────────
-            Text(
-                text = "CLIENT AUDIO ENGINE DIAGNOSTICS (7 TASKS)",
-                color = AccentEnd,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 1.sp
-            )
-            Spacer(Modifier.height(10.dp))
-
-            DiagnosticCard(
-                title = "1. Hardware Echo Canceler (AEC)",
-                status = if (hasHardwareAec) "Hardware Telephony DSP Active" else "VOICE_COMMUNICATION DSP Active",
-                isSuccess = true,
-                detail = "Hardware DSP cancels speaker output before mic signal reaches CPU."
-            )
-            Spacer(Modifier.height(8.dp))
-
-            DiagnosticCard(
-                title = "2. Noise Suppression & AGC",
-                status = if (hasHardwareNs) "Multi-Mic Hardware Beamforming" else "Spectral Subtraction + AGC Active",
-                isSuccess = true,
-                detail = "Cleans background acoustics and normalizes speech input volume."
-            )
-            Spacer(Modifier.height(8.dp))
-
-            DiagnosticCard(
-                title = "3. Ultra Low-Latency Audio Pipeline",
-                status = "Fast-Mixer AAudio Bypass (10ms frames)",
-                isSuccess = true,
-                detail = "Real-time thread priority (THREAD_PRIORITY_URGENT_AUDIO) on 16kHz PCM."
-            )
-            Spacer(Modifier.height(8.dp))
-
-            DiagnosticCard(
-                title = "4. Full-Duplex Bidirectional Streaming",
-                status = "Gemini Live WebSocket Client",
-                isSuccess = true,
-                detail = "Simultaneous upload and playback via persistent full-duplex socket."
-            )
-            Spacer(Modifier.height(8.dp))
-
-            DiagnosticCard(
-                title = "5. Adaptive Jitter Buffer & DAC Drain",
-                status = "Hardware DAC Sample Position Sync",
-                isSuccess = true,
-                detail = "Tracks exact physical speaker drain to eliminate premature turn cut-offs."
-            )
-            Spacer(Modifier.height(8.dp))
-
-            DiagnosticCard(
-                title = "6. Zero-Latency Local Barge-In",
-                status = "<1ms Local Kill-Switch Armed",
-                isSuccess = true,
-                detail = "Local RMS VAD gate stops speaker playback before server round-trip."
-            )
-            Spacer(Modifier.height(8.dp))
-
-            DiagnosticCard(
-                title = "7. Real-Time FFT Waveform & Haptics",
-                status = "64 Bark-Scale Filterbank (GPU Canvas)",
-                isSuccess = true,
-                detail = "Non-blocking high-speed energy filterbank with tactile haptic events."
-            )
-
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(28.dp))
 
             // ── Save Button ───────────────────────────────────────────────
             Button(
                 onClick = {
+                    viewModel.saveProvider(selectedProvider)
                     viewModel.saveApiKey(apiKeyText)
                     viewModel.saveSystemPrompt(promptText)
                     viewModel.saveModelId(selectedModel)
                     viewModel.saveVoiceName(selectedVoice)
+
+                    viewModel.saveGroqApiKey(groqKeyText)
+                    viewModel.saveGroqLlmModel(selectedGroqLlm)
+                    viewModel.saveGroqWhisperModel(selectedGroqWhisper)
+
                     saveStatus = "Settings saved successfully!"
                 },
                 modifier = Modifier
@@ -416,67 +512,6 @@ fun SettingsScreen(
             }
 
             Spacer(Modifier.height(40.dp))
-        }
-    }
-}
-
-@Composable
-private fun DiagnosticCard(
-    title: String,
-    status: String,
-    isSuccess: Boolean,
-    detail: String
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(DarkCard)
-            .border(1.dp, DarkBorder, RoundedCornerShape(12.dp))
-            .padding(12.dp)
-    ) {
-        Column {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = title,
-                    color = DarkText,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = if (isSuccess) Icons.Default.CheckCircle else Icons.Default.Error,
-                        contentDescription = null,
-                        tint = if (isSuccess) GeminiGreen else GeminiRed,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        text = if (isSuccess) "READY" else "DISABLED",
-                        color = if (isSuccess) GeminiGreen else GeminiRed,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = status,
-                color = AccentEnd,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = detail,
-                color = DarkSubtext,
-                fontSize = 11.sp,
-                lineHeight = 15.sp
-            )
         }
     }
 }

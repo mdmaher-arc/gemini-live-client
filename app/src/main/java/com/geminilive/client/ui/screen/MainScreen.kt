@@ -58,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.geminilive.client.data.AiProvider
 import com.geminilive.client.data.SessionState
 import com.geminilive.client.data.TurnRole
 import com.geminilive.client.ui.component.WaveformVisualizer
@@ -74,13 +75,14 @@ import com.geminilive.client.viewmodel.GeminiLiveViewModel
 @Composable
 fun MainScreen(viewModel: GeminiLiveViewModel) {
     val sessionState by viewModel.sessionState.collectAsState()
-    val fftData by viewModel.fftData.collectAsState()
+    val spectrumData by viewModel.spectrumData.collectAsState()
     val captureLevel by viewModel.captureLevel.collectAsState()
     val playbackLevel by viewModel.playbackLevel.collectAsState()
     val conversation by viewModel.conversation.collectAsState()
     val userTranscript by viewModel.userTranscript.collectAsState()
     val aiTranscript by viewModel.aiTranscript.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
+    val provider by viewModel.provider.collectAsState()
 
     var showSettings by remember { mutableStateOf(false) }
 
@@ -123,13 +125,13 @@ fun MainScreen(viewModel: GeminiLiveViewModel) {
             ) {
                 Column {
                     Text(
-                        text = "Gemini Live",
+                        text = if (provider == AiProvider.GEMINI) "Gemini Live" else "Groq Voice",
                         color = DarkText,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = sessionState.label(),
+                        text = sessionState.label(provider),
                         color = sessionState.labelColor(),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
@@ -203,7 +205,7 @@ fun MainScreen(viewModel: GeminiLiveViewModel) {
                     .padding(16.dp)
             ) {
                 WaveformVisualizer(
-                    fftData = fftData,
+                    spectrumData = spectrumData,
                     sessionState = sessionState,
                     captureLevel = captureLevel,
                     playbackLevel = playbackLevel,
@@ -213,7 +215,7 @@ fun MainScreen(viewModel: GeminiLiveViewModel) {
 
             // ── Status label under orb ───────────────────────────────────
             AnimatedContent(
-                targetState = sessionState.statusText(),
+                targetState = sessionState.statusText(provider),
                 transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(300)) },
                 label = "status"
             ) { text ->
@@ -381,13 +383,13 @@ private fun LoadingButton() {
 }
 
 // ── Helper extensions ─────────────────────────────────────────────────────────
-private fun SessionState.label() = when (this) {
-    SessionState.IDLE -> "Ready"
+private fun SessionState.label(provider: AiProvider) = when (this) {
+    SessionState.IDLE -> if (provider == AiProvider.GEMINI) "Ready (Gemini)" else "Ready (Groq)"
     SessionState.CONNECTING -> "Connecting…"
     SessionState.CONNECTED -> "Connected"
     SessionState.LISTENING -> "● Listening"
-    SessionState.THINKING -> "⟳ Processing"
-    SessionState.SPEAKING -> "▶ Speaking"
+    SessionState.THINKING -> if (provider == AiProvider.GEMINI) "⟳ Gemini Thinking" else "⟳ Groq Thinking"
+    SessionState.SPEAKING -> if (provider == AiProvider.GEMINI) "▶ Gemini Speaking" else "▶ Groq Speaking"
     SessionState.ERROR -> "Error"
 }
 
@@ -400,12 +402,12 @@ private fun SessionState.labelColor() = when (this) {
     else -> DarkSubtext
 }
 
-private fun SessionState.statusText() = when (this) {
-    SessionState.IDLE -> "Tap the mic to begin a live conversation"
-    SessionState.CONNECTING -> "Connecting to Gemini…"
+private fun SessionState.statusText(provider: AiProvider) = when (this) {
+    SessionState.IDLE -> if (provider == AiProvider.GEMINI) "Tap the mic to begin with Gemini Live" else "Tap the mic to begin with Groq Voice"
+    SessionState.CONNECTING -> if (provider == AiProvider.GEMINI) "Connecting to Gemini Live…" else "Starting Groq Voice session…"
     SessionState.CONNECTED -> "Connected — starting microphone…"
-    SessionState.LISTENING -> "Speak naturally. Gemini is listening."
-    SessionState.THINKING -> "Thinking…"
+    SessionState.LISTENING -> if (provider == AiProvider.GEMINI) "Speak naturally. Gemini is listening." else "Speak naturally. Groq Whisper is listening."
+    SessionState.THINKING -> if (provider == AiProvider.GEMINI) "Gemini is thinking…" else "Groq Whisper & Llama processing…"
     SessionState.SPEAKING -> "Tap pause to interrupt"
-    SessionState.ERROR -> "Connection error. Check settings & retry."
+    SessionState.ERROR -> "Error encountered. Check settings & retry."
 }

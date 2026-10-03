@@ -11,3 +11,9 @@ local.properties
 app/build/
 app/release.keystore
 release/
+
+*.wav
+*.py
+*.ps1
+.kotlin/
+__pycache__/
